@@ -76,7 +76,6 @@ func getEncoder() zapcore.Encoder {
 	return zapcore.NewConsoleEncoder(cfg)
 }
 
-
 //fixme 更丰富的日志轮转，比如按天切割
 func getWriteSyncer() zapcore.WriteSyncer {
 	lumberJackLogger := &lumberjack.Logger{
@@ -88,4 +87,8 @@ func getWriteSyncer() zapcore.WriteSyncer {
 	}
 
 	return zapcore.AddSync(lumberJackLogger)
+}
+
+func GetWriter() zapcore.WriteSyncer {
+	return getWriteSyncer()
 }
