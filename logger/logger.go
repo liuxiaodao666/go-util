@@ -15,7 +15,7 @@ import (
 2、自定义日志模块初始化失败时，提供一个默认的日志
 */
 
-//var defaultLogger *zap.Logger
+// var defaultLogger *zap.Logger
 var customLogger *zap.Logger
 
 func init() {
@@ -76,7 +76,7 @@ func getEncoder() zapcore.Encoder {
 	return zapcore.NewConsoleEncoder(cfg)
 }
 
-//fixme 更丰富的日志轮转，比如按天切割
+// fixme 更丰富的日志轮转，比如按天切割
 func getWriteSyncer() zapcore.WriteSyncer {
 	lumberJackLogger := &lumberjack.Logger{
 		Filename:  "./log/test.log",
