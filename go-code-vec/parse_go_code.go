@@ -7,20 +7,21 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/ioutil"
+	"os"
+
 	"log"
 )
 
 func parseGoFile() {
 	fset := token.NewFileSet() // 创建一个新的FileSet
-	filePath := "/home/lighthouse/code/go/go-util/logger/logger.go"
+	filePath := "D:\\code\\go\\go-util\\logger\\logger.go"
 	file, err := parser.ParseFile(fset, filePath, nil, parser.ParseComments)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// 读取文件内容
-	src, err := ioutil.ReadFile(filePath)
+	src, err := os.ReadFile(filePath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -39,7 +40,7 @@ func parseGoFile() {
 			start := fset.Position(fn.Body.Lbrace).Offset
 			end := fset.Position(fn.Body.Rbrace).Offset
 			// 提取函数体内容
-			body := src[start:end]
+			body := src[start : end+1]
 			// 打印函数体
 			fmt.Printf("Body:\n%s\n", string(body))
 			fmt.Println() // 打印一个空行作为分隔
