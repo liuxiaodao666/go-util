@@ -1,118 +1,101 @@
 package gopool
 
 import (
+	"context"
 	"fmt"
-	"time"
+	"github.com/liuxiaodao666/go-util/logger"
+	"sync"
 )
 
-// Task 定义了一个任务接口··
-type Task func() (interface{}, error)
-
-// Worker 是一个能够接收任务请求的并发实体
-type Worker struct {
-	workerPool chan chan Task
-	taskQueue  chan Task
-	quit       chan bool
+// Job is an interface that represents a unit of work to be executed by a worker.
+type Job interface {
+	Run(ctx context.Context) error
 }
 
-// NewWorker 创建一个新的工作协程
-func NewWorker(workerPool chan chan Task) *Worker {
-	return &Worker{
-		workerPool: workerPool,
-		taskQueue:  make(chan Task),
-		quit:       make(chan bool),
+// WorkerPool is the main structure that holds the pool of workers.
+type WorkerPool struct {
+	taskQueue chan Job
+	//wg        sync.WaitGroup
+	mu     sync.Mutex
+	active int // Number of active workers
+	max    int // Maximum number of workers
+}
+
+// NewWorkerPool initializes and returns a new WorkerPool with the given maxWorkers.
+func NewWorkerPool(maxWorkers int, maxWaitJobs int) *WorkerPool {
+	return &WorkerPool{
+		taskQueue: make(chan Job, maxWaitJobs), // Buffered channel for jobs
+		max:       maxWorkers,
 	}
 }
 
-// Start 方法用于启动工作协程，它会使工作协程进入监听状态，等待任务请求
-func (w *Worker) Start() {
+// Start starts the worker pool with a specified number of workers.
+func (wp *WorkerPool) Start(numWorkers int) {
+	for i := 0; i < numWorkers; i++ {
+		wp.startWorker()
+	}
+}
+
+// startWorker creates a new worker goroutine that listens on the task queue.
+func (wp *WorkerPool) startWorker() {
+	wp.mu.Lock()
+	if wp.active >= wp.max {
+		wp.mu.Unlock()
+		logger.Warnf("active workers reach max [%d], can't start new worker", wp.active)
+		return
+	}
+	wp.active++
+	wp.mu.Unlock()
+
+	//wp.wg.Add(1)
 	go func() {
-		for {
-			// 将当前工作的任务通道注册到工作池中
-			w.workerPool <- w.taskQueue
-			select {
-			case task := <-w.taskQueue:
-				// 接收到任务后，执行任务
-				result, err := task()
-				if err != nil {
-					fmt.Println("Error executing task:", err)
-				} else {
-					fmt.Println("Task result:", result)
-				}
-			case <-w.quit:
-				// 接收到退出信号，停止工作
-				return
+		//defer wp.wg.Done()
+		for job := range wp.taskQueue {
+			//ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := job.Run(context.Background())
+			//cancel()
+			if err != nil {
+				logger.Errorf("Error executing job: %v\n", err)
 			}
 		}
 	}()
 }
 
-// Stop 停止工作协程
-func (w *Worker) Stop() {
-	go func() {
-		w.quit <- true
-	}()
-}
-
-// TaskQueue 是一个任务请求通道
-type TaskQueue chan Task
-
-// Dispatcher 负责分配任务给空闲的工作协程
-type Dispatcher struct {
-	workerPool chan chan Task
-	workers    []*Worker
-}
-
-// NewDispatcher 创建一个新的调度器
-func NewDispatcher(maxWorkers int) *Dispatcher {
-	pool := make(chan chan Task, maxWorkers)
-	return &Dispatcher{workerPool: pool}
-}
-
-// Run 启动调度器
-func (d *Dispatcher) Run(maxWorkers int) {
-	d.workers = make([]*Worker, maxWorkers)
-	for i := 0; i < maxWorkers; i++ {
-		worker := NewWorker(d.workerPool)
-		worker.Start()
-		d.workers[i] = worker
+// Submit submits a job to the worker pool for execution.
+func (wp *WorkerPool) Submit(job Job) {
+	select {
+	case wp.taskQueue <- job:
+	default:
+		fmt.Println("Task queue full, dropping job.")
 	}
 }
 
-// Submit 提交任务到调度器
-func (d *Dispatcher) Submit(task Task) {
-	go func() {
-		d.workerPool <- task
-	}()
+// Stop stops the worker pool gracefully.
+func (wp *WorkerPool) Stop() {
+	close(wp.taskQueue)
+	//wp.wg.Wait()
 }
 
-// Stop 优雅地关闭调度器
-func (d *Dispatcher) Stop() {
-	// 关闭工作池
-	close(d.workerPool)
-	// 停止所有工作协程
-	for _, worker := range d.workers {
-		worker.Stop()
-	}
+// Stats returns statistics about the worker pool.
+func (wp *WorkerPool) Stats() map[string]int {
+	stats := make(map[string]int)
+	wp.mu.Lock()
+	stats["active_workers"] = wp.active
+	wp.mu.Unlock()
+	return stats
 }
 
-func main() {
-	dispatcher := NewDispatcher(4)
-	dispatcher.Run(4)
+// ErrorHandling handles errors from jobs.
+func (wp *WorkerPool) ErrorHandling(err error) {
+	// Implement error handling logic here.
+}
 
-	// 提交一些任务
-	for i := 0; i < 10; i++ {
-		task := Task(func() (interface{}, error) {
-			return i * i, nil
-		})
-		dispatcher.Submit(task)
-	}
+// Cleanup releases resources held by the worker pool.
+func (wp *WorkerPool) Cleanup() {
+	// Implement resource cleanup logic here.
+}
 
-	// 模拟长时间运行的服务
-	fmt.Println("Service is running, press enter to stop...")
-	fmt.Scanln()
-
-	// 优雅地关闭调度器
-	dispatcher.Stop()
-	fmt.Println("Dispatcher stopped.")
+// Log logs information about the worker pool.
+func (wp *WorkerPool) Log(msg string) {
+	fmt.Println(msg)
 }
