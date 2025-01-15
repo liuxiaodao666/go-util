@@ -31,6 +31,12 @@ type CallBackMedia struct {
 	Assessment  string `json:"assessment"`
 }
 
+func saveDebugImage(img *image.RGBA, name string) {
+	f, _ := os.Create(name)
+	defer f.Close()
+	png.Encode(f, img)
+}
+
 // createSVGFile 创建 SVG 文件并返回文件路径
 func CreateSVGFile(dirPath string, callBackMedia CallBackMedia) (string, error) {
 	var fanShapeColor [3]float64
@@ -55,29 +61,100 @@ func CreateSVGFile(dirPath string, callBackMedia CallBackMedia) (string, error) 
 	return dirPath, nil
 }
 
+// 添加 alpha 混合函数
+func alphaBlend(dst, src color.Color) color.RGBA {
+	dr, dg, db, da := dst.RGBA()
+	sr, sg, sb, sa := src.RGBA()
+
+	// 转换到 0-255 范围
+	dr >>= 8
+	dg >>= 8
+	db >>= 8
+	da >>= 8
+	sr >>= 8
+	sg >>= 8
+	sb >>= 8
+	sa >>= 8
+
+	// alpha 混合计算
+	a := sa + da*(255-sa)/255
+	if a == 0 {
+		return color.RGBA{0, 0, 0, 0}
+	}
+
+	r := (sr*sa + dr*da*(255-sa)/255) / a
+	g := (sg*sa + dg*da*(255-sa)/255) / a
+	b := (sb*sa + db*da*(255-sa)/255) / a
+
+	return color.RGBA{uint8(r), uint8(g), uint8(b), uint8(a)}
+}
+
+// 修改 drawPng 函数
 func drawPng(fanShapeColor [3]float64, fanShapeEndAngle, scoreFloat float64, pngName string) {
 	// 创建一个新的 RGBA 图像
 	img := image.NewRGBA(image.Rect(0, 0, 300, 200))
 
-	// 填充背景为白色
-	// draw.Draw(img, img.Bounds(), &image.Uniform{color.White}, image.Point{}, draw.Src)
+	// // 1. 填充白色背景
+	// for y := 0; y < img.Bounds().Dy(); y++ {
+	// 	for x := 0; x < img.Bounds().Dx(); x++ {
+	// 		img.Set(x, y, color.White)
+	// 	}
+	// }
+	// saveDebugImage(img, "0_background.png")
 
-	// 绘制灰色背景圆
-	drawCircle(img, 150, 100, 90, color.RGBA{237, 237, 237, 255})
+	// 2. 创建临时缓冲区用于每个图层
+	tempImg := image.NewRGBA(img.Bounds())
+	copy(tempImg.Pix, img.Pix)
 
-	// 绘制扇形
-	drawSector(img, 150, 100, 90, 270, fanShapeEndAngle, fanShapeColor)
+	// 3. 绘制灰色背景圆
+	drawCircle(tempImg, 150, 100, 90, color.RGBA{237, 237, 237, 255})
+	// 混合到主图层
+	blendLayers(img, tempImg)
+	saveDebugImage(img, "1_gray_circle.png")
 
-	// 绘制中心白色圆
-	drawCircle(img, 150, 100, 50, color.White)
+	// 4. 绘制扇形
+	clear(tempImg)
+	drawSector(tempImg, 150, 100, 90, 270, fanShapeEndAngle, fanShapeColor)
+	// 混合到主图层
+	blendLayers(img, tempImg)
+	saveDebugImage(img, "2_sector.png")
 
-	// 绘制文字
+	// 5. 绘制中心白色圆
+	clear(tempImg)
+	drawCircle(tempImg, 150, 100, 50, color.RGBA{255, 255, 255, 245})
+	blendLayers(img, tempImg)
+	saveDebugImage(img, "3_white_circle.png")
+
+	// 6. 绘制文字
 	drawText(img, scoreFloat, 150, 100)
+	saveDebugImage(img, "4_text.png")
 
-	// 保存为PNG文件
+	// 保存最终结果
 	f, _ := os.Create(pngName)
 	defer f.Close()
 	png.Encode(f, img)
+}
+
+// 清空临时缓冲区
+func clear(img *image.RGBA) {
+	for i := range img.Pix {
+		img.Pix[i] = 0
+	}
+}
+
+// 混合两个图层
+func blendLayers(dst, src *image.RGBA) {
+	bounds := dst.Bounds()
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			dstColor := dst.RGBAAt(x, y)
+			srcColor := src.RGBAAt(x, y)
+			if srcColor.A > 0 { // 只处理非透明像素
+				blended := alphaBlend(dstColor, srcColor)
+				dst.Set(x, y, blended)
+			}
+		}
+	}
 }
 
 // 添加抗锯齿相关常量
@@ -87,89 +164,180 @@ const (
 	bezierStep = 0.0005 // 贝塞尔曲线采样精度
 )
 
-// 绘制带抗锯齿的圆形
+// 修改 drawCircle 函数，为小圆提供更好的抗锯齿效果
 func drawCircle(img *image.RGBA, centerX, centerY, radius int, c color.Color) {
-	// 创建超采样缓冲区
-	ssaaImg := image.NewRGBA(image.Rect(0, 0, img.Bounds().Dx()*ssaaScale, img.Bounds().Dy()*ssaaScale))
+	cr, cg, cb, ca := c.RGBA()
+	cr >>= 8
+	cg >>= 8
+	cb >>= 8
+	ca >>= 8
 
-	// 计算超采样后的参数
-	sCenterX := centerX * ssaaScale
-	sCenterY := centerY * ssaaScale
-	sRadius := radius * ssaaScale
-	offset := int(float64(sRadius) * kappa)
+	// 增加采样倍数
+	localScale := ssaaScale * 4 // 增加采样倍数
 
-	// 定义圆的基准点
-	points := []struct{ x, y int }{
-		{sCenterX, sCenterY - sRadius},
-		{sCenterX + sRadius, sCenterY},
-		{sCenterX, sCenterY + sRadius},
-		{sCenterX - sRadius, sCenterY},
+	ssaaImg := image.NewRGBA(image.Rect(0, 0, img.Bounds().Dx()*localScale, img.Bounds().Dy()*localScale))
+	sCenterX := centerX * localScale
+	sCenterY := centerY * localScale
+	sRadius := radius * localScale
+
+	// 增加边缘柔化范围
+	edgeWidth := float64(localScale) * 2.0 // 增加边缘过渡区域
+
+	for y := -sRadius - int(edgeWidth); y <= sRadius+int(edgeWidth); y++ {
+		for x := -sRadius - int(edgeWidth); x <= sRadius+int(edgeWidth); x++ {
+			dist := math.Sqrt(float64(x*x + y*y))
+
+			// 使用更平滑的过渡函数
+			alpha := 1.0
+			if dist > float64(sRadius) {
+				alpha = 0.0
+			} else if dist > float64(sRadius)-edgeWidth {
+				// 使用更平滑的过渡
+				t := (float64(sRadius) - dist) / edgeWidth
+				alpha = smoothstep(t)
+			}
+
+			if alpha > 0 {
+				// 应用颜色
+				ssaaImg.Set(sCenterX+x, sCenterY+y, color.RGBA{
+					R: uint8(float64(cr) * alpha),
+					G: uint8(float64(cg) * alpha),
+					B: uint8(float64(cb) * alpha),
+					A: uint8(float64(ca) * alpha),
+				})
+			}
+		}
 	}
 
-	// 定义控制点
-	controls := []struct{ x1, y1, x2, y2 int }{
-		{
-			sCenterX + offset, sCenterY - sRadius,
-			sCenterX + sRadius, sCenterY - offset,
-		},
-		{
-			sCenterX + sRadius, sCenterY + offset,
-			sCenterX + offset, sCenterY + sRadius,
-		},
-		{
-			sCenterX - offset, sCenterY + sRadius,
-			sCenterX - sRadius, sCenterY + offset,
-		},
-		{
-			sCenterX - sRadius, sCenterY - offset,
-			sCenterX - offset, sCenterY - sRadius,
-		},
+	// 使用高斯模糊进行平滑
+	gaussianBlur(ssaaImg, 1.5)
+
+	// 缩放回原始大小
+	downscaleWithRadius(ssaaImg, img, localScale)
+}
+
+// 添加高斯模糊函数
+func gaussianBlur(img *image.RGBA, sigma float64) {
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+
+	// 创建临时缓冲区
+	temp := image.NewRGBA(bounds)
+
+	// 计算高斯核大小
+	kernelSize := int(sigma * 3)
+	kernel := make([]float64, kernelSize*2+1)
+	for i := range kernel {
+		x := float64(i - kernelSize)
+		kernel[i] = math.Exp(-(x * x) / (2 * sigma * sigma))
 	}
 
-	// 绘制贝塞尔曲线到超采样缓冲区
-	for i := 0; i < 4; i++ {
-		p0 := points[i]
-		p1 := controls[i]
-		p2 := points[(i+1)%4]
+	// 水平方向模糊
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			var r, g, b, a float64
+			var sum float64
 
-		drawAntialiasedBezier(ssaaImg,
-			p0.x, p0.y,
-			p1.x1, p1.y1,
-			p1.x2, p1.y2,
-			p2.x, p2.y,
-			c)
+			for i := -kernelSize; i <= kernelSize; i++ {
+				px := x + i
+				if px < 0 {
+					px = 0
+				}
+				if px >= w {
+					px = w - 1
+				}
+
+				weight := kernel[i+kernelSize]
+				pixel := img.RGBAAt(px, y)
+				r += float64(pixel.R) * weight
+				g += float64(pixel.G) * weight
+				b += float64(pixel.B) * weight
+				a += float64(pixel.A) * weight
+				sum += weight
+			}
+
+			temp.Set(x, y, color.RGBA{
+				uint8(r / sum),
+				uint8(g / sum),
+				uint8(b / sum),
+				uint8(a / sum),
+			})
+		}
 	}
 
-	// 填充圆形内部
-	floodFill(ssaaImg, sCenterX, sCenterY, c)
-	// 将超采样缓冲区缩放回原始大小并进行平滑处理
-	for y := 0; y < img.Bounds().Dy(); y++ {
-		for x := 0; x < img.Bounds().Dx(); x++ {
-			// 计算超采样区域的边界
-			sx := x * ssaaScale
-			sy := y * ssaaScale
+	// 垂直方向模糊
+	for x := 0; x < w; x++ {
+		for y := 0; y < h; y++ {
+			var r, g, b, a float64
+			var sum float64
 
-			// 收集超采样像素的颜色
-			var r, g, b, a uint32
-			for dy := 0; dy < ssaaScale; dy++ {
-				for dx := 0; dx < ssaaScale; dx++ {
-					c := ssaaImg.RGBAAt(sx+dx, sy+dy)
-					r += uint32(c.R)
-					g += uint32(c.G)
-					b += uint32(c.B)
-					a += uint32(c.A)
+			for i := -kernelSize; i <= kernelSize; i++ {
+				py := y + i
+				if py < 0 {
+					py = 0
+				}
+				if py >= h {
+					py = h - 1
+				}
+
+				weight := kernel[i+kernelSize]
+				pixel := temp.RGBAAt(x, py)
+				r += float64(pixel.R) * weight
+				g += float64(pixel.G) * weight
+				b += float64(pixel.B) * weight
+				a += float64(pixel.A) * weight
+				sum += weight
+			}
+
+			img.Set(x, y, color.RGBA{
+				uint8(r / sum),
+				uint8(g / sum),
+				uint8(b / sum),
+				uint8(a / sum),
+			})
+		}
+	}
+}
+
+// 改进的平滑过渡函数
+func smoothstep(x float64) float64 {
+	if x <= 0 {
+		return 0
+	}
+	if x >= 1 {
+		return 1
+	}
+	return x * x * x * (x*(x*6-15) + 10)
+}
+
+// 根据不同的采样倍数进行缩放
+func downscaleWithRadius(ssaa *image.RGBA, dst *image.RGBA, scale int) {
+	bounds := dst.Bounds()
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			var r, g, b, a float64
+
+			// 采样超采样缓冲区的对应像素
+			for dy := 0; dy < scale; dy++ {
+				for dx := 0; dx < scale; dx++ {
+					sx := x*scale + dx
+					sy := y*scale + dy
+					c := ssaa.RGBAAt(sx, sy)
+					r += float64(c.R)
+					g += float64(c.G)
+					b += float64(c.B)
+					a += float64(c.A)
 				}
 			}
 
 			// 计算平均值
-			scale := uint32(ssaaScale * ssaaScale)
-			r /= scale
-			g /= scale
-			b /= scale
-			a /= scale
-
-			// 设置最终像素颜色
-			img.Set(x, y, color.RGBA{uint8(r), uint8(g), uint8(b), uint8(a)})
+			scaleSquared := float64(scale * scale)
+			dst.Set(x, y, color.RGBA{
+				uint8(r / scaleSquared),
+				uint8(g / scaleSquared),
+				uint8(b / scaleSquared),
+				uint8(a / scaleSquared),
+			})
 		}
 	}
 }
@@ -265,8 +433,18 @@ func colorEquals(c1, c2 color.Color) bool {
 }
 
 func drawSector(img *image.RGBA, centerX, centerY, radius int, startAngle, endAngle float64, fanShapeColor [3]float64) {
+	// 创建超采样缓冲区
+	ssaaImg := image.NewRGBA(image.Rect(0, 0, img.Bounds().Dx()*ssaaScale, img.Bounds().Dy()*ssaaScale))
+
+	// 计算超采样后的参数
+	sCenterX := centerX * ssaaScale
+	sCenterY := centerY * ssaaScale
+	sRadius := radius * ssaaScale
+
 	start := startAngle * math.Pi / 180.0
 	end := endAngle * math.Pi / 180.0
+
+	// 转换颜色
 	c := color.RGBA{
 		R: uint8(fanShapeColor[0] * 255),
 		G: uint8(fanShapeColor[1] * 255),
@@ -274,19 +452,39 @@ func drawSector(img *image.RGBA, centerX, centerY, radius int, startAngle, endAn
 		A: 255,
 	}
 
-	for y := -radius; y <= radius; y++ {
-		for x := -radius; x <= radius; x++ {
-			if x*x+y*y <= radius*radius {
+	// 在超采样缓冲区中绘制扇形
+	for y := -sRadius - 1; y <= sRadius+1; y++ {
+		for x := -sRadius - 1; x <= sRadius+1; x++ {
+			// 计算点到圆心的距离
+			dist := math.Sqrt(float64(x*x + y*y))
+
+			if dist <= float64(sRadius) {
 				angle := math.Atan2(float64(y), float64(x))
 				if angle < 0 {
 					angle += 2 * math.Pi
 				}
+
 				if isAngleBetween(angle, start, end) {
-					img.Set(centerX+x, centerY+y, c)
+					// 计算抗锯齿的 alpha 值
+					alpha := 1.0
+					if dist > float64(sRadius-1) {
+						alpha = float64(sRadius) - dist
+					}
+
+					// 设置像素颜色，考虑 alpha 混合
+					ssaaImg.Set(sCenterX+x, sCenterY+y, color.RGBA{
+						R: uint8(float64(c.R) * alpha),
+						G: uint8(float64(c.G) * alpha),
+						B: uint8(float64(c.B) * alpha),
+						A: uint8(float64(c.A) * alpha),
+					})
 				}
 			}
 		}
 	}
+
+	// 将超采样缓冲区缩放回原始大小
+	downscale(ssaaImg, img)
 }
 
 func isAngleBetween(angle, start, end float64) bool {
@@ -343,4 +541,36 @@ func drawText(img *image.RGBA, score float64, x, y int) error {
 	d.DrawString(text)
 
 	return nil
+}
+
+// 添加缩放函数
+func downscale(ssaa *image.RGBA, dst *image.RGBA) {
+	bounds := dst.Bounds()
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			var r, g, b, a float64
+
+			// 采样超采样缓冲区的对应像素
+			for dy := 0; dy < ssaaScale; dy++ {
+				for dx := 0; dx < ssaaScale; dx++ {
+					sx := x*ssaaScale + dx
+					sy := y*ssaaScale + dy
+					c := ssaa.RGBAAt(sx, sy)
+					r += float64(c.R)
+					g += float64(c.G)
+					b += float64(c.B)
+					a += float64(c.A)
+				}
+			}
+
+			// 计算平均值
+			scale := float64(ssaaScale * ssaaScale)
+			dst.Set(x, y, color.RGBA{
+				uint8(r / scale),
+				uint8(g / scale),
+				uint8(b / scale),
+				uint8(a / scale),
+			})
+		}
+	}
 }
