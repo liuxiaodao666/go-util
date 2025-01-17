@@ -4,8 +4,8 @@ import "testing"
 
 func TestPng(t *testing.T) {
 	var callBackMedia CallBackMedia
-	callBackMedia.HealthScore = "96"
-	callBackMedia.Assessment = "excellent"
+	callBackMedia.HealthScore = "88"
+	callBackMedia.Assessment = "good"
 
 	CreateSVGFile("out.png", callBackMedia)
 }
