@@ -8,11 +8,6 @@ import (
 	"math"
 	"os"
 	"strconv"
-
-	"golang.org/x/image/font"
-	"golang.org/x/image/font/gofont/goregular"
-	"golang.org/x/image/font/opentype"
-	"golang.org/x/image/math/fixed"
 )
 
 // getFanShapeColor 根据评估等级返回颜色
@@ -45,7 +40,8 @@ func CreateSVGFile(dirPath string, callBackMedia CallBackMedia) (string, error) 
 	//fmt.Printf("Parsed score as float: %.1f\n", scoreFloat)
 
 	//计算扇形结束角度
-	fanShapeEndAngle = 360*(scoreFloat/100) + 270
+	fanShapeEndAngle = math.Floor(360*(scoreFloat/100) + 270)
+	fmt.Println(fanShapeEndAngle)
 	//扇形颜色
 	fanShapeColor = getFanShapeColor(callBackMedia.Assessment)
 	//fmt.Printf("Fan shape color: %s\n", fanShapeColor)
@@ -64,17 +60,34 @@ func drawPng(fanShapeColor [3]float64, fanShapeEndAngle, scoreFloat float64, png
 
 	// 绘制灰色背景圆
 	drawCircle(img, 150, 100, 90, color.RGBA{237, 237, 237, 255})
-
+	tempSave(img, "1.png")
 	// 绘制扇形
-	drawSector(img, 150, 100, 90, 270, fanShapeEndAngle, fanShapeColor)
-
+	// 当结束角度超过360度时，需要分两次绘制
+	if fanShapeEndAngle > 360 {
+		// 先绘制270到360度的部分
+		drawSector(img, 150, 100, 90, 270, 360, fanShapeColor)
+		// 再绘制0到剩余角度的部分
+		drawSector(img, 150, 100, 90, 0, fanShapeEndAngle-360, fanShapeColor)
+	} else {
+		drawSector(img, 150, 100, 90, 270, fanShapeEndAngle, fanShapeColor)
+	}
+	tempSave(img, "2.png")
 	// 绘制中心白色圆
 	drawCircle(img, 150, 100, 50, color.White)
 
 	// 绘制文字
-	drawText(img, scoreFloat, 150, 100)
+	err := drawText(img, scoreFloat, 150, 100)
+	if err != nil {
+		fmt.Println(err)
+	}
 
 	// 保存为PNG文件
+	f, _ := os.Create(pngName)
+	defer f.Close()
+	png.Encode(f, img)
+}
+
+func tempSave(img image.Image, pngName string) {
 	f, _ := os.Create(pngName)
 	defer f.Close()
 	png.Encode(f, img)
@@ -83,13 +96,12 @@ func drawPng(fanShapeColor [3]float64, fanShapeEndAngle, scoreFloat float64, png
 // 添加抗锯齿相关常量
 const (
 	kappa      = 0.5522847498
-	ssaaScale  = 2      // 超采样倍数
-	bezierStep = 0.0005 // 贝塞尔曲线采样精度
+	ssaaScale  = 4      // 超采样倍数
+	bezierStep = 0.0001 // 贝塞尔曲线采样精度
 )
 
 // 绘制带抗锯齿的圆形
 func drawCircle(img *image.RGBA, centerX, centerY, radius int, c color.Color) {
-	// 创建超采样缓冲区
 	ssaaImg := image.NewRGBA(image.Rect(0, 0, img.Bounds().Dx()*ssaaScale, img.Bounds().Dy()*ssaaScale))
 
 	// 计算超采样后的参数
@@ -145,31 +157,47 @@ func drawCircle(img *image.RGBA, centerX, centerY, radius int, c color.Color) {
 	// 将超采样缓冲区缩放回原始大小并进行平滑处理
 	for y := 0; y < img.Bounds().Dy(); y++ {
 		for x := 0; x < img.Bounds().Dx(); x++ {
-			// 计算超采样区域的边界
+			existingColor := img.RGBAAt(x, y)
 			sx := x * ssaaScale
 			sy := y * ssaaScale
 
-			// 收集超采样像素的颜色
-			var r, g, b, a uint32
+			var r, g, b, a float64
+			samples := float64(ssaaScale * ssaaScale)
+			targetR, targetG, targetB, targetA := c.RGBA()
+
+			// 转换目标颜色到0-255范围
+			targetR = targetR >> 8
+			targetG = targetG >> 8
+			targetB = targetB >> 8
+			targetA = targetA >> 8
+
+			// 收集超采样像素
 			for dy := 0; dy < ssaaScale; dy++ {
 				for dx := 0; dx < ssaaScale; dx++ {
-					c := ssaaImg.RGBAAt(sx+dx, sy+dy)
-					r += uint32(c.R)
-					g += uint32(c.G)
-					b += uint32(c.B)
-					a += uint32(c.A)
+					ssaaColor := ssaaImg.RGBAAt(sx+dx, sy+dy)
+					if ssaaColor.A > 0 {
+						// 使用目标颜色的RGB值，只从采样中获取alpha
+						r += float64(targetR) / samples
+						g += float64(targetG) / samples
+						b += float64(targetB) / samples
+						a += float64(ssaaColor.A) / samples
+					}
 				}
 			}
 
-			// 计算平均值
-			scale := uint32(ssaaScale * ssaaScale)
-			r /= scale
-			g /= scale
-			b /= scale
-			a /= scale
+			// 如果新颜色的alpha值足够大，则完全使用目标颜色
+			if a > 250 {
+				img.Set(x, y, c)
+			} else if a > 0 {
+				// alpha混合
+				alpha := a / 255.0
+				newR := uint8(float64(existingColor.R)*(1-alpha) + float64(targetR)*alpha)
+				newG := uint8(float64(existingColor.G)*(1-alpha) + float64(targetG)*alpha)
+				newB := uint8(float64(existingColor.B)*(1-alpha) + float64(targetB)*alpha)
+				newA := uint8(math.Max(float64(existingColor.A), a))
 
-			// 设置最终像素颜色
-			img.Set(x, y, color.RGBA{uint8(r), uint8(g), uint8(b), uint8(a)})
+				img.Set(x, y, color.RGBA{newR, newG, newB, newA})
+			}
 		}
 	}
 }
@@ -265,8 +293,16 @@ func colorEquals(c1, c2 color.Color) bool {
 }
 
 func drawSector(img *image.RGBA, centerX, centerY, radius int, startAngle, endAngle float64, fanShapeColor [3]float64) {
+	ssaaImg := image.NewRGBA(image.Rect(0, 0, img.Bounds().Dx()*ssaaScale, img.Bounds().Dy()*ssaaScale))
+
+	sCenterX := centerX * ssaaScale
+	sCenterY := centerY * ssaaScale
+	sRadius := (radius - 1) * ssaaScale
+
 	start := startAngle * math.Pi / 180.0
 	end := endAngle * math.Pi / 180.0
+
+	// 预乘alpha的颜色值
 	c := color.RGBA{
 		R: uint8(fanShapeColor[0] * 255),
 		G: uint8(fanShapeColor[1] * 255),
@@ -274,16 +310,76 @@ func drawSector(img *image.RGBA, centerX, centerY, radius int, startAngle, endAn
 		A: 255,
 	}
 
-	for y := -radius; y <= radius; y++ {
-		for x := -radius; x <= radius; x++ {
-			if x*x+y*y <= radius*radius {
-				angle := math.Atan2(float64(y), float64(x))
-				if angle < 0 {
-					angle += 2 * math.Pi
+	// 绘制扇形到超采样缓冲区
+	for y := -sRadius - 1; y <= sRadius+1; y++ {
+		for x := -sRadius - 1; x <= sRadius+1; x++ {
+			dist := math.Sqrt(float64(x*x + y*y))
+
+			// 计算边缘平滑度
+			edgeDist := math.Abs(dist - float64(sRadius))
+			if dist > float64(sRadius+1) {
+				continue
+			}
+
+			angle := math.Atan2(float64(y), float64(x))
+			if angle < 0 {
+				angle += 2 * math.Pi
+			}
+
+			if isAngleBetween(angle, start, end) {
+				// 计算alpha值，考虑边缘平滑
+				alpha := float64(1.0)
+				if edgeDist < 1.0 {
+					alpha = 1.0 - edgeDist
 				}
-				if isAngleBetween(angle, start, end) {
-					img.Set(centerX+x, centerY+y, c)
+
+				// 使用预乘alpha的颜色值
+				col := color.RGBA{
+					R: uint8(float64(c.R) * alpha),
+					G: uint8(float64(c.G) * alpha),
+					B: uint8(float64(c.B) * alpha),
+					A: uint8(255 * alpha),
 				}
+				ssaaImg.Set(sCenterX+x, sCenterY+y, col)
+			}
+		}
+	}
+
+	// 将超采样缓冲区缩放回原始大小
+	for y := 0; y < img.Bounds().Dy(); y++ {
+		for x := 0; x < img.Bounds().Dx(); x++ {
+			existingColor := img.RGBAAt(x, y)
+			sx := x * ssaaScale
+			sy := y * ssaaScale
+
+			var r, g, b float64
+			var totalAlpha float64
+			samples := float64(ssaaScale * ssaaScale)
+
+			// 收集并平均超采样像素
+			for dy := 0; dy < ssaaScale; dy++ {
+				for dx := 0; dx < ssaaScale; dx++ {
+					ssaaColor := ssaaImg.RGBAAt(sx+dx, sy+dy)
+					alpha := float64(ssaaColor.A) / 255.0
+					r += float64(ssaaColor.R) / samples
+					g += float64(ssaaColor.G) / samples
+					b += float64(ssaaColor.B) / samples
+					totalAlpha += alpha / samples
+				}
+			}
+
+			if totalAlpha > 0 {
+				// 使用预乘alpha进行颜色混合
+				finalAlpha := totalAlpha
+				if finalAlpha > 1.0 {
+					finalAlpha = 1.0
+				}
+
+				newR := uint8(r + float64(existingColor.R)*(1.0-finalAlpha))
+				newG := uint8(g + float64(existingColor.G)*(1.0-finalAlpha))
+				newB := uint8(b + float64(existingColor.B)*(1.0-finalAlpha))
+
+				img.Set(x, y, color.RGBA{newR, newG, newB, 255})
 			}
 		}
 	}
@@ -296,51 +392,31 @@ func isAngleBetween(angle, start, end float64) bool {
 	return angle >= start || angle <= end
 }
 
-func drawText(img *image.RGBA, score float64, x, y int) error {
-	// 解析字体
-	f, err := opentype.Parse(goregular.TTF)
-	if err != nil {
-		return err
-	}
+// drawText 在指定位置绘制居中的文本
+func drawText(img *image.RGBA, score float64, centerX, centerY int) error {
+	font := NewFont("numbers", 32, 64)
+	font.SetCharSpacing(1)
+	font.SetScale(0.8)
 
-	// 创建字体face
-	face, err := opentype.NewFace(f, &opentype.FaceOptions{
-		Size:    45,
-		DPI:     72,
-		Hinting: font.HintingFull,
-	})
-	if err != nil {
-		return err
-	}
-	defer face.Close()
+	// 将分数转换为字符串
+	text := fmt.Sprintf("%v", score)
 
-	// 创建drawer
-	d := &font.Drawer{
-		Dst:  img,
-		Src:  image.NewUniform(color.Black),
-		Face: face,
-	}
+	// 计算缩放后的字符尺寸
+	charWidth, charHeight := font.GetScaledSize()
+	scaledSpacing := int(float64(font.CharSpacing) * font.Scale)
 
-	// 格式化文本
-	text := fmt.Sprintf("%.1f", score)
+	// 计算整个文本的总宽度
+	totalWidth := len(text)*(charWidth+scaledSpacing) - scaledSpacing // 减去最后一个字符后的间距
 
-	// 计算文本尺寸
-	bounds, _ := d.BoundString(text)
-	textWidth := bounds.Max.X - bounds.Min.X
-	textHeight := bounds.Max.Y - bounds.Min.Y
-
-	// 计算绘制位置（居中）
-	px := fixed.I(x) - textWidth/2
-	py := fixed.I(y) + textHeight/2
-
-	// 设置绘制位置
-	d.Dot = fixed.Point26_6{
-		X: px,
-		Y: py,
-	}
+	// 计算起始位置，使文本居中
+	startX := centerX - totalWidth/2
+	startY := centerY - charHeight/2
 
 	// 绘制文本
-	d.DrawString(text)
+	err := font.DrawText(img, startX, startY, text, color.RGBA{0, 0, 0, 255})
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
